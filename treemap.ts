@@ -16,17 +16,21 @@ import {
     getChartContext,
     Query,
 } from '@thoughtspot/ts-chart-sdk';
+import HighchartsCustomEvents from 'highcharts-custom-events';
 
 // Initialize Highcharts Treemap, Heatmap, Exporting, and Offline Exporting modules
 Exporting(Highcharts);
 OfflineExporting(Highcharts); // Initialize offline exporting
 Treemap(Highcharts);
 Heatmap(Highcharts);
+HighchartsCustomEvents(Highcharts);
+
 
 // Extend Highcharts to include tooltipData
 declare module 'highcharts' {
     interface PointOptionsObject {
         tooltipData?: Array<{ columnName: string, value: number }>;
+        labelData?: Array<{ columnName: string, value: number }>; // Added labelData
     }
 }
 
@@ -34,7 +38,7 @@ let userNumberFormat = '0.0'; // Default number format
 let numberOfLabels = 1; // Default to showing labels for the top 1 point
 
 // Default gradient colors
-let gradientColor0 = '#F0F0F0'; // Light gray for 0%
+let gradientColor0 = '#FDB4E5'; // Light gray for 0%
 let gradientColor50 = '#A8D5BA'; // Soft green for 50%
 let gradientColor100 = '#4F6D7A'; // Muted teal for 100%
 
@@ -56,7 +60,7 @@ const numberFormatter = (value: number, format = '0.0') => {
         return formattedValue;
     } catch (error) {
         console.error("Error in numberFormatter: ", error);
-        return value;
+        return value.toString();
     }
 };
 
@@ -80,7 +84,8 @@ function getTickPositions(minValue: number, maxValue: number, numTicks: number =
 function getDataModel(chartModel: ChartModel) {
     console.log("Extracting data model from chartModel: ", chartModel);
     try {
-        const configDimensions = chartModel.config?.chartConfig?.[0].dimensions ?? [];
+        const configDimensions = chartModel.config?.chartConfig?.[1]?.dimensions ?? chartModel.config?.chartConfig?.[0]?.dimensions ?? [];
+
         const dataArr = chartModel.data?.[0]?.data ?? undefined;
 
         if (!dataArr) {
@@ -91,25 +96,48 @@ function getDataModel(chartModel: ChartModel) {
         const categoryColumn = configDimensions?.[0]?.columns?.[0]; // First attribute (x-axis)
         const measureColumns = _.filter(chartModel.columns, col => col.type === ColumnType.MEASURE);
 
+        // Get additional configuration for size, color, labels, and tooltip columns
+        const sizeMeasureCol = configDimensions[1]?.columns?.[0];
+        const colorMeasureCol = configDimensions[2]?.columns?.[0];
+        const labelMeasureArr = configDimensions[3]?.columns || [];
+        const tooltipArr = configDimensions[4]?.columns || [];
+
+        // Merging label and tooltip arrays as required
+        const tooltipArrFinal = _.concat(sizeMeasureCol, colorMeasureCol, labelMeasureArr, tooltipArr);
+        const labelMeasureArrFinal = _.concat(sizeMeasureCol, colorMeasureCol, labelMeasureArr);
+
+        const categoryColumnIndex = dataArr.columns.findIndex(col => col === categoryColumn?.id);
+        const sizeColumnIndex = dataArr.columns.findIndex(col => col === sizeMeasureCol?.id);
+        const colorColumnIndex = dataArr.columns.findIndex(col => col === colorMeasureCol?.id);
+
         if (!categoryColumn || measureColumns.length === 0) {
             console.error('The chart requires a category and at least one measure.');
             return { values: [] };
         }
 
         const dataModel = dataArr.dataValue.map((row) => {
-            const categoryName = row[0]; // First attribute (category) column
+            const categoryName = row[categoryColumnIndex];
+            const sizeMeasureValue = parseFloat(row[sizeColumnIndex]);
+            const colorMeasureValue = parseFloat(row[colorColumnIndex]);
 
-            const tooltipData = measureColumns.map((col, colIndex) => {
-                const measureValue = row[colIndex + 1]; // Adjusted index for measure columns
-                return { columnName: col.name, value: measureValue };
-            });
+            const tooltipData = tooltipArrFinal.map((col) => ({
+                columnName: col.name,
+                value: row[dataArr.columns.findIndex(c => c === col.id)],
+            }));
 
-            return {
+            const labelData = labelMeasureArrFinal.map((col) => ({
+                columnName: col.name,
+                value: row[dataArr.columns.findIndex(c => c === col.id)],
+            }));
+
+            const chartDataPoint = {
                 name: categoryName !== undefined ? categoryName.toString() : 'Unnamed',
-                value: parseFloat(row[1]), // First measure column value used for the treemap
-                colorValue: parseFloat(row[2]), // Correct the colorValue to use the second measure column (index 2)
+                value: sizeMeasureValue,
+                colorValue: colorMeasureValue,
                 tooltipData: tooltipData,
+                labelData: labelData, // Add labelData to the point object
             };
+            return chartDataPoint;
         });
 
         dataModel.sort((a, b) => b.value - a.value);
@@ -126,7 +154,6 @@ function getDataModel(chartModel: ChartModel) {
 
 // Function to download the chart as a PNG using Highcharts offline exporting module
 function downloadChartAsPNG(chartInstance: any) {
-    console.log("Downloading chart as PNG...");
     chartInstance.exportChartLocal({
         type: 'image/png',
         filename: 'treemap-chart',
@@ -135,26 +162,22 @@ function downloadChartAsPNG(chartInstance: any) {
 
 // Function to get parsed event details
 function getParsedEvent(evt: any) {
-    console.log("Extracting clientX and clientY from event: ", evt);
-    
-    // Ensure the correct properties are extracted from the event
     return {
-        clientX: evt.clientX || evt.point.pageX,  // Fall back to evt.point.pageX if clientX is unavailable
-        clientY: evt.clientY || evt.point.pageY   // Fall back to evt.point.pageY if clientY is unavailable
+        clientX: evt.clientX || evt.point.pageX,
+        clientY: evt.clientY || evt.point.pageY
     };
 }
 
 // Function to render the treemap chart
 function render(ctx: CustomChartContext) {
-    debugger;
     console.log("Rendering the chart...");
-
     try {
         const chartModel = ctx.getChartModel();
         if (!chartModel) {
             console.error("chartModel is undefined");
             return;
         }
+        const configDimensions = chartModel.config?.chartConfig?.[0]?.dimensions ?? [];
 
         const dataModel = getDataModel(chartModel);
 
@@ -173,16 +196,8 @@ function render(ctx: CustomChartContext) {
         const minColorValue = Math.min(...dataModel.values.map(d => d.colorValue));
         const maxColorValue = Math.max(...dataModel.values.map(d => d.colorValue));
 
-        // Extract the correct column IDs from the chart configuration
-        const categoryColumn = chartModel.config?.chartConfig?.[0]?.dimensions?.[0]?.columns?.[0]?.id;
-        const measureColumn = chartModel.config?.chartConfig?.[0]?.dimensions?.[1]?.columns?.[0]?.id;
-        const colorAxisColumn = chartModel.config?.chartConfig?.[0]?.dimensions?.[2]?.columns?.[0]?.name;
 
-        if (!categoryColumn || !measureColumn) {
-            console.error("Invalid configuration: Missing category or measure columns.");
-            return;
-        }
-
+        
         const chartInstance = Highcharts.chart({
             chart: {
                 renderTo: 'chart',
@@ -190,6 +205,34 @@ function render(ctx: CustomChartContext) {
                 events: {
                     load: function () {
                         console.log("Chart loaded successfully");
+
+                        // Add right-click (context menu) event listener
+                        this.container.addEventListener('contextmenu', function(event) {
+                            // Prevent the default browser right-click menu
+                            event.preventDefault();
+
+                            // Create a PointerEvent from MouseEvent
+                            const pointerEvent = new PointerEvent('pointerdown', {
+                                clientX: event.clientX,
+                                clientY: event.clientY,
+                                pointerType: 'mouse',
+                            });
+
+                            const clickedPoint = chartInstance.series[0].searchPoint(pointerEvent, true); // Search for the clicked point
+                            if (clickedPoint) {
+                                // Trigger the ThoughtSpot context menu here
+                                ctx.emitEvent(ChartToTSEvent.OpenContextMenu, {
+                                    event: getParsedEvent(event),
+                                    clickedPoint: {
+                                        tuple: [
+                                            { columnId: configDimensions?.[0]?.columns?.[0]?.id, value: clickedPoint.name },
+                                            { columnId: configDimensions?.[1]?.columns?.[0]?.id, value: clickedPoint.value },
+                                            { columnId: configDimensions?.[2]?.columns?.[0]?.id, value: clickedPoint.options.colorValue }
+                                        ],
+                                    },
+                                });
+                            }
+                        });
                     }
                 }
             },
@@ -198,78 +241,77 @@ function render(ctx: CustomChartContext) {
                 layoutAlgorithm: 'squarified',
                 data: dataModel.values.map(dataPoint => ({
                     ...dataPoint,
-                    colorValue: dataPoint.colorValue // Color by the second measure column
+                    colorValue: dataPoint.colorValue
                 })),
                 dataLabels: {
                     enabled: true,
-                    align: 'center', // Align horizontally to the center
-                    verticalAlign: 'middle', // Align vertically to the middle
-                    useHTML: true,
+                    align: 'center',
+                    verticalAlign: 'middle',
+                    useHTML: false,  // SVG rendering, so keep useHTML false
                     formatter: function () {
-                        const point = this.point;
-                        let labelHtml = `<span style="display: inline-block; width: 100%; text-align: center;">${point.name}</span><br>`;  // Inline-block with width 100% for centering
+                        const point: Highcharts.PointOptionsObject = this.point;  // Get the current point for labeling
+                        
+                        /*let labelHtml = `<tspan fill="white" stroke="white" stroke-width="1.2" stroke-linejoin="round" 
+                                            style="display: inline-block; text-align: center; font-size: 13px; 
+                                            font-weight: 900; color: rgb(0,0,0);"
+                                            font-face="Helvetica">${point.name}</tspan><br>`;*/
 
+                        
+                        let labelHtml=point.name + "<br>"   ;               
+                        
+                        // Loop through labelData and append label content if applicable
                         if (this.point.index < numberOfLabels) {
-                            point.options.tooltipData?.forEach(tooltipCol => {
-                                if (dataModel.measureColumns.includes(tooltipCol.columnName)) {
-                                    labelHtml += `<span style="display: inline-block; width: 100%; text-align: center;">${tooltipCol.columnName}: ${numberFormatter(tooltipCol.value, userNumberFormat)}</span><br>`;
-                                } else {
-                                    labelHtml += `<span style="display: inline-block; width: 100%; text-align: center;">${tooltipCol.columnName}: ${tooltipCol.value}</span><br>`;
-                                }
+                            point.labelData?.forEach(labelCol => {
+                                /*labelHtml += `<tspan fill="white" stroke="white" stroke-width="1.2" stroke-linejoin="round" 
+                                                style="display: inline-block; text-align: center; font-size: 13px; 
+                                                font-weight: 200; color: rgb(0,0,0);">
+                                                ${labelCol.columnName}: ${numberFormatter(labelCol.value, userNumberFormat)}
+                                              </tspan><br>`;*/
+                                labelHtml+=labelCol.columnName+": " +numberFormatter(labelCol.value, userNumberFormat)+"<br>";
                             });
                         }
                         return labelHtml;
                     },
                     style: {
-                        fontSize: '13px',
-                        fontWeight: 'normal',
+                        fontFamily: 'optimo-plain, "Helvetica Neue", Helvetica, Arial, sans-serif',
+                        fontWeight: '500',
+                        color: '#ffffff',
+                        fontSize: '12px',
                     },
                 },
                 point: {
                     events: {
-                        click: function (e) {
-                            console.log("Point click event triggered");
+                        contextmenu: function (e) {
+                            e.preventDefault();
                             const clickedPointDetails = this;
                             const categoryValue = clickedPointDetails.name;
                             const measureValue = clickedPointDetails.value;
+                            const colorValue = clickedPointDetails.options.colorValue;
                             debugger;
-                            console.log('Clicked Point Details: ', clickedPointDetails);
 
+                            
                             ctx.emitEvent(ChartToTSEvent.OpenContextMenu, {
                                 event: getParsedEvent(e),
+
                                 clickedPoint: {
                                     tuple: [
-                                        { columnId: categoryColumn, value: categoryValue },
-                                        { columnId: measureColumn, value: measureValue }
+                                        { columnId: configDimensions?.[0]?.columns?.[0]?.id, value: categoryValue },
+                                        { columnId: configDimensions?.[1]?.columns?.[0]?.id, value: measureValue },
+                                        { columnId: configDimensions?.[2]?.columns?.[0]?.id, value: colorValue }
                                     ],
                                 },
-                                customActions: [
-                                    {
-                                        id: 'custom-action-1',
-                                        label: 'Custom user action 1',
-                                        icon: '',
-                                        onClick: (...args) => {
-                                            console.log('Custom action 1 triggered', args);
-                                        },
-                                    },
-                                    {
-                                        id: 'download-chart',
-                                        label: 'Download chart',
-                                        icon: '',
-                                        onClick: () => downloadChartAsPNG(chartInstance), // Pass the chart instance here
-                                    },
-                                ],
                             });
                         }
                     }
                 }
-            }],
+            }] as any,
             title: {
                 text: '',
             },
+            //
             colorAxis: {
+                width: '50%',
                 minColor: gradientColor0,
-                width: '40%',
                 maxColor: gradientColor100,
                 stops: [
                     [0, gradientColor0],
@@ -281,12 +323,12 @@ function render(ctx: CustomChartContext) {
                         const value = typeof this.value === 'string' ? parseFloat(this.value) : this.value;
                         return numberFormatter(value, userNumberFormat);
                     },
-                    step: 1,
                 },
             },
+
             legend: {
                 title: {
-                    text: colorAxisColumn, // Dynamic color axis title
+                    text: configDimensions[2]?.columns?.[0].name,
                     style: {
                         fontFamily: 'Helvetica',
                         fontSize: '11px'
@@ -303,26 +345,40 @@ function render(ctx: CustomChartContext) {
                 enabled: false
             },
             tooltip: {
+                followPointer: true,
+                padding: 10, // Padding inside the tooltip for better spacing
+                shadow: true, // Enable a shadow for better visibility
+                backgroundColor: '#3A3F48', // Dark background color
+                borderColor: '#FFD700', // A subtle gold-like border (based on the border seen in the image)
+                borderRadius: 4, // Slightly rounded corners
+                borderWidth: 1, // Thin border
+                style: {
+                    color: '#FFFFFF', // White text
+                    fontSize: '12px', // Font size similar to the image
+                    fontFamily: '"Helvetica Neue", Helvetica, Arial, sans-serif', // Sans-serif font
+                    fontWeight: 'normal', // Normal font-weight for value text
+                    textAlign: 'left', // Left-align the text
+                },
+                positioner: function (labelWidth, labelHeight, point) {
+                    // Display tooltip above the cursor
+                    return {
+                        x: point.plotX + this.chart.plotLeft - labelWidth / 2,
+                        y: point.plotY + this.chart.plotTop - labelHeight - 10 // 10 pixels above the cursor
+                    };
+                },
                 useHTML: true,
                 pointFormatter: function () {
                     const point = this;
                     const options = point.options;
-
-                    let tooltipHtml = `<span class="labelName"><b>${dataModel.categoryName}</b></span>: <span class="labelValue">${point.name}</span><br>`;
-
-                    if (options.tooltipData) {
+                    let tooltipHtml = dataModel.categoryName+": "+"<br>"+point.name + "<br>"+"<br>";
+                    if (options.tooltipData && Array.isArray(options.tooltipData)) {
                         options.tooltipData.forEach((tooltipCol) => {
-                            if (dataModel.measureColumns.includes(tooltipCol.columnName)) {
-                                tooltipHtml += `<span class="labelName"><b>${tooltipCol.columnName}</b></span>: <span class="labelValue">${numberFormatter(tooltipCol.value, userNumberFormat)}</span><br>`;
-                            } else {
-                                tooltipHtml += `<span class="labelName"><b>${tooltipCol.columnName}</b></span>: <span class="labelValue">${tooltipCol.value}</span><br>`;
-                            }
+                            tooltipHtml += tooltipCol.columnName+": "+"<br>" +numberFormatter(tooltipCol.value, userNumberFormat)+ "<br>"+"<br>";
                         });
                     }
-
                     return tooltipHtml;
                 }
-            
+
             }
         });
     } catch (error) {
@@ -332,7 +388,6 @@ function render(ctx: CustomChartContext) {
 
 // Function to render the chart
 const renderChart = async (ctx: CustomChartContext): Promise<void> => {
-    console.log("Starting chart rendering process...");
     try {
         ctx.emitEvent(ChartToTSEvent.RenderStart);
         render(ctx);
@@ -347,83 +402,59 @@ const renderChart = async (ctx: CustomChartContext): Promise<void> => {
     }
 };
 
-// Initialization function with dynamic assignment of columns
-const init = async () => {
-    console.log("Initializing chart...");
+// Immediately Invoked Async Function (IIFE) to initialize and render the chart
+(async () => {
+    console.log("IIFE Started");
     try {
         const ctx = await getChartContext({
             getDefaultChartConfig: (chartModel: ChartModel): ChartConfig[] => {
                 console.log("Generating default chart configuration...");
 
-                // Fetch columns from chart model
-                const cols = chartModel.columns;
+                const cols = chartModel.columns ?? [];
+                const attributeColumns = _.filter(cols, (col) => col.type === ColumnType.ATTRIBUTE);
+                const measureColumns = _.filter(cols, (col) => col.type === ColumnType.MEASURE);
 
-                // Filter columns for attributes and measures
-                const attributeColumns = _.filter(
-                    cols,
-                    (col) => col.type === ColumnType.ATTRIBUTE,
-                );
-                const measureColumns = _.filter(
-                    cols,
-                    (col) => col.type === ColumnType.MEASURE,
-                );
-
-                // Add extra logging to track the columns
-                console.log("Attribute columns:", attributeColumns);
-                console.log("Measure columns:", measureColumns);
-
-                // Ensure the necessary columns are present
                 if (attributeColumns.length === 0 || measureColumns.length === 0) {
-                    throw new Error("Invalid chart configuration: Missing required attribute or measure columns.");
+                    throw new Error("Missing required attribute or measure columns.");
                 }
 
-                // Auto-assign the columns based on search
-                const axisConfig: ChartConfig = {
-                    key: 'default',
+                return [{
+                    key: 'column',
                     dimensions: [
                         {
-                            key: 'category', // x-axis
-                            columns: attributeColumns.length > 0 ? attributeColumns[0] : [], // Ensure it's an array
+                            key: 'category', // x-axis (category)
+                            columns: attributeColumns.length > 0 ? [attributeColumns[0]] : [],
                         },
                         {
-                            key: 'measure', // y-axis
-                            columns: measureColumns.length > 0 ? measureColumns[0] : [], // Ensure it's an array
+                            key: 'measure', // y-axis (measure)
+                            columns: measureColumns.length > 0 ? [measureColumns[0]] : [],
                         },
                         {
-                            key: 'color axis',
-                            columns: measureColumns.length > 1 ? measureColumns[1] : [], // Ensure it's an array
+                            key: 'coloraxis', // Color axis
+                            columns: measureColumns.length > 1 ? [measureColumns[1]] : [],
                         },
                         {
-                            key: 'Labels',
-                            columns: measureColumns.length > 2 ? measureColumns.slice(2, 4) : [], // Limit to two labels
+                            key: 'Labels', // Optional labels
+                            columns: measureColumns.length > 2 ? measureColumns.slice(2, 4) : [],
                         },
                         {
-                            key: 'Tooltip columns',
-                            columns: measureColumns.length > 4 ? measureColumns.slice(4) : [], // Max up to 5 tooltip columns
+                            key: 'tooltips', // Tooltip columns
+                            columns: measureColumns.length > 4 ? measureColumns.slice(4) : [],
                         },
                     ],
-                };
-
-                // Log the final config
-                console.log("Chart Config:", axisConfig);
-
-                return [axisConfig];
+                }];
             },
-            getQueriesFromChartConfig: (chartConfig: ChartConfig[]): Array<Query> =>
-                chartConfig.map((config: ChartConfig): Query =>
+            getQueriesFromChartConfig: (chartConfig: ChartConfig[]): Array<Query> => {
+                return chartConfig.map((config: ChartConfig): Query =>
                     _.reduce(
                         config.dimensions,
                         (acc: Query, dimension) => ({
-                            queryColumns: [
-                                ...acc.queryColumns,
-                                ...dimension.columns,
-                            ],
+                            queryColumns: [...acc.queryColumns, ...dimension.columns],
                         }),
-                        {
-                            queryColumns: [],
-                        } as Query,
+                        { queryColumns: [] } as Query,
                     ),
-                ),
+                );
+            },
             renderChart: (ctx) => renderChart(ctx),
             chartConfigEditorDefinition: [
                 {
@@ -436,7 +467,6 @@ const init = async () => {
                             label: 'Category (x-axis)',
                             allowAttributeColumns: true,
                             allowMeasureColumns: false,
-                            allowTimeSeriesColumns: false,
                             maxColumnCount: 1,
                         },
                         {
@@ -444,21 +474,19 @@ const init = async () => {
                             label: 'Measure (y-axis)',
                             allowAttributeColumns: false,
                             allowMeasureColumns: true,
-                            allowTimeSeriesColumns: false,
+                            maxColumnCount: 1,
                         },
                         {
                             key: 'coloraxis',
                             label: 'Color Axis',
                             allowAttributeColumns: false,
                             allowMeasureColumns: true,
-                            allowTimeSeriesColumns: false,
                         },
                         {
                             key: 'Labels',
                             label: 'Labels',
                             allowAttributeColumns: false,
                             allowMeasureColumns: true,
-                            allowTimeSeriesColumns: false,
                             maxColumnCount: 2,
                         },
                         {
@@ -466,7 +494,6 @@ const init = async () => {
                             label: 'Tooltip Columns',
                             allowAttributeColumns: false,
                             allowMeasureColumns: true,
-                            allowTimeSeriesColumns: false,
                             maxColumnCount: 5,
                         },
                     ],
@@ -490,29 +517,29 @@ const init = async () => {
                         key: 'gradientColor0',
                         type: 'colorpicker',
                         defaultValue: '#FFFFFF',
-                        label: 'Color for 0%'
+                        label: 'Color for 0%',
                     },
                     {
                         key: 'gradientColor50',
                         type: 'colorpicker',
                         defaultValue: '#FFCC00',
-                        label: 'Color for 50%'
+                        label: 'Color for 50%',
                     },
                     {
                         key: 'gradientColor100',
                         type: 'colorpicker',
                         defaultValue: '#FF0000',
-                        label: 'Color for 100%'
-                    }
+                        label: 'Color for 100%',
+                    },
                 ],
             },
+            allowedConfigurations: {
+                allowColumnConditionalFormatting: true
+            }
         });
 
         renderChart(ctx);
     } catch (error) {
-        debugger;
-        console.error('Error during init: ', error);
+        console.error('Error during initialization: ', error);
     }
-};
-
-await init();
+})();
